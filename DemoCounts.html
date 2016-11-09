@@ -1,0 +1,908 @@
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r"><span class="kw">library</span>(<span class="st">&#39;dplyr&#39;</span>)</code></pre></div>
+<pre><code>## 
+## Attaching package: &#39;dplyr&#39;
+
+## The following objects are masked from &#39;package:stats&#39;:
+## 
+##     filter, lag
+
+## The following objects are masked from &#39;package:base&#39;:
+## 
+##     intersect, setdiff, setequal, union</code></pre>
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r"><span class="kw">library</span>(<span class="st">&#39;tidyr&#39;</span>)
+<span class="kw">library</span>(<span class="st">&#39;sigr&#39;</span>) <span class="co"># https://github.com/WinVector/sigr</span>
+<span class="kw">library</span>(<span class="st">&#39;ggplot2&#39;</span>)
+<span class="kw">library</span>(<span class="st">&#39;vtreat&#39;</span>)
+<span class="kw">source</span>(<span class="st">&#39;fns.R&#39;</span>)
+
+<span class="kw">set.seed</span>(<span class="dv">236526</span>)
+
+cl &lt;-<span class="st"> </span>parallel::<span class="kw">makeCluster</span>(parallel::<span class="kw">detectCores</span>())
+parallel::<span class="kw">clusterExport</span>(<span class="dt">cl=</span>cl, <span class="kw">setdiff</span>(<span class="kw">ls</span>(),<span class="st">&#39;cl&#39;</span>),
+              <span class="dt">envir=</span><span class="kw">environment</span>())
+for(lib in <span class="kw">c</span>(<span class="st">&#39;dplyr&#39;</span>, <span class="st">&#39;tidyr&#39;</span>, <span class="st">&#39;vtreat&#39;</span> )) {
+  mkfn &lt;-<span class="st"> </span>function(lib) {
+    <span class="kw">force</span>(lib)
+    function() {
+      <span class="kw">library</span>(lib,<span class="dt">character.only =</span> <span class="ot">TRUE</span>)
+    }
+  }
+  fn &lt;-<span class="st"> </span><span class="kw">mkfn</span>(lib)
+  parallel::<span class="kw">clusterCall</span>(cl, fn )
+}</code></pre></div>
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r">cacheFile &lt;-<span class="st"> &#39;fitRes.RDS&#39;</span>
+if(!<span class="kw">file.exists</span>(cacheFile)) {
+  fitRes &lt;-<span class="st"> </span><span class="kw">c</span>()
+  for(runnum in <span class="dv">1</span>:<span class="dv">10</span>) {
+    generator =<span class="st"> </span><span class="kw">defineGenerator</span>(<span class="dv">5</span>,<span class="dv">20</span>,<span class="fl">0.75</span>,<span class="fl">0.3</span>)
+    for(ndup in <span class="kw">c</span>(<span class="dv">0</span>,<span class="dv">1</span>,<span class="dv">4</span>)) {
+      dTrain &lt;-<span class="st"> </span><span class="kw">generateData</span>(generator,ndup,<span class="dv">500</span>)
+      dTest &lt;-<span class="st"> </span><span class="kw">generateData</span>(generator,ndup,<span class="dv">10000</span>)
+      resi &lt;-<span class="st"> </span><span class="ot">NULL</span>
+      <span class="co"># resi &lt;- rbind(runIndicators(dTrain,dTest)) # crashes on novel levels</span>
+      resi &lt;-<span class="st"> </span><span class="kw">rbind</span>(resi,<span class="kw">runNaive</span>(dTrain,dTest))
+      resi &lt;-<span class="st"> </span><span class="kw">rbind</span>(resi,<span class="kw">runSplit</span>(dTrain,dTest))
+      resi &lt;-<span class="st"> </span><span class="kw">rbind</span>(resi,<span class="kw">runJackknifed</span>(dTrain,dTest))
+      resi &lt;-<span class="st"> </span><span class="kw">rbind</span>(resi,<span class="kw">runVtreat</span>(dTrain,dTest))
+      resi$LaplaceRate &lt;-<span class="st"> </span><span class="ot">NA_real_</span>
+      
+      for(absit in <span class="kw">c</span>(<span class="ot">FALSE</span>,<span class="ot">TRUE</span>)) {
+        <span class="co"># get a good Laplace noise rate sigma</span>
+        estL &lt;-<span class="st"> </span><span class="kw">data.frame</span>(<span class="dt">LaplaceNoiseRate=</span><span class="kw">sort</span>(<span class="kw">rep</span>(<span class="kw">exp</span>(<span class="kw">seq</span>(<span class="kw">log</span>(<span class="fl">0.1</span>),<span class="kw">log</span>(<span class="dv">25</span>),<span class="dt">length.out=</span><span class="dv">12</span>)),<span class="dv">5</span>)))
+        mkLScoreFn &lt;-<span class="st"> </span>function(dTrain,dTest,absit) {
+          <span class="kw">force</span>(dTrain)
+          <span class="kw">force</span>(dTest)
+          <span class="kw">force</span>(absit)
+          function(sigma) {
+            <span class="kw">runLaplaceNoised</span>(dTrain,dTest,<span class="dt">laplaceRate=</span>sigma,<span class="dt">absNoise=</span>absit)
+          }
+        }
+        LScoreFn &lt;-<span class="st"> </span><span class="kw">mkLScoreFn</span>(dTrain,dTest,absit)
+        scrs &lt;-<span class="st">  </span>parallel::<span class="kw">parLapplyLB</span>(cl,estL$LaplaceNoiseRate,LScoreFn)
+        estL$pseudoR2 &lt;-<span class="st"> </span><span class="kw">vapply</span>(scrs,
+                                function(si) {
+                                  si$pseudoR2[si$data==<span class="st">&#39;test&#39;</span>]
+                                },<span class="kw">numeric</span>(<span class="dv">1</span>))
+        
+        <span class="kw">print</span>(<span class="kw">ggplot</span>(<span class="dt">data=</span>estL,<span class="dt">mapping=</span><span class="kw">aes</span>(<span class="dt">x=</span>LaplaceNoiseRate,<span class="dt">y=</span>pseudoR2)) +
+<span class="st">                </span><span class="kw">geom_point</span>() +<span class="st"> </span><span class="kw">geom_smooth</span>() +
+<span class="st">                </span><span class="kw">ggtitle</span>(<span class="kw">paste0</span>(<span class="st">&#39;finding optimal Laplace noise rate for ndup=&#39;</span>,ndup,
+                               <span class="st">&#39;, abs=&#39;</span>,absit)))
+        estL %&gt;%<span class="st"> </span><span class="kw">group_by</span>(LaplaceNoiseRate) %&gt;%<span class="st"> </span>
+<span class="st">          </span><span class="kw">summarize</span>(<span class="dt">meanPseudoR2=</span><span class="kw">mean</span>(pseudoR2)) -&gt;<span class="st"> </span>estS
+        laplaceRate &lt;-<span class="st"> </span>estS$LaplaceNoiseRate[<span class="kw">which.max</span>(estS$meanPseudoR2)]
+        <span class="kw">print</span>(laplaceRate)
+        resL &lt;-<span class="st"> </span><span class="kw">runLaplaceNoised</span>(dTrain,dTest,<span class="dt">laplaceRate=</span>laplaceRate,<span class="dt">absNoise=</span>absit)
+        resL$LaplaceRate &lt;-<span class="st"> </span>laplaceRate
+        resi &lt;-<span class="st"> </span><span class="kw">rbind</span>(resi,resL)
+      }
+      
+      resi$ndup &lt;-<span class="st"> </span>ndup
+      resi$runnum &lt;-<span class="st"> </span>runnum
+      
+      fitRes &lt;-<span class="st"> </span><span class="kw">rbind</span>(fitRes,resi)
+    }
+  }
+  <span class="kw">saveRDS</span>(fitRes,<span class="dt">file=</span>cacheFile)
+} else {
+  fitRes &lt;-<span class="st"> </span><span class="kw">readRDS</span>(<span class="dt">file=</span>cacheFile)
+}</code></pre></div>
+<pre><code>## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-1.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-2.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-3.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-4.png" alt="" />
+
+</div>
+<pre><code>## [1] 9.161169
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-5.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-6.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-7.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-8.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-9.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-10.png" alt="" />
+
+</div>
+<pre><code>## [1] 9.161169
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-11.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-12.png" alt="" />
+
+</div>
+<pre><code>## [1] 0.7446946
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-13.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-14.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-15.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-16.png" alt="" />
+
+</div>
+<pre><code>## [1] 15.13371
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-17.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-18.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-19.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-20.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-21.png" alt="" />
+
+</div>
+<pre><code>## [1] 3.357081
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-22.png" alt="" />
+
+</div>
+<pre><code>## [1] 15.13371
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-23.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-24.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-25.png" alt="" />
+
+</div>
+<pre><code>## [1] 0.7446946
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-26.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-27.png" alt="" />
+
+</div>
+<pre><code>## [1] 5.5457
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-28.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-29.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-30.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-31.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-32.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-33.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-34.png" alt="" />
+
+</div>
+<pre><code>## [1] 15.13371
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-35.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-36.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-37.png" alt="" />
+
+</div>
+<pre><code>## [1] 0.7446946
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-38.png" alt="" />
+
+</div>
+<pre><code>## [1] 3.357081
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-39.png" alt="" />
+
+</div>
+<pre><code>## [1] 3.357081
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-40.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-41.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning: prediction from a rank-deficient fit may be misleading
+
+## Warning: prediction from a rank-deficient fit may be misleading
+
+## Warning: prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-42.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-43.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-44.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-45.png" alt="" />
+
+</div>
+<pre><code>## [1] 3.357081
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning: prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-46.png" alt="" />
+
+</div>
+<pre><code>## [1] 15.13371
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-47.png" alt="" />
+
+</div>
+<pre><code>## [1] 15.13371
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning: prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-48.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-49.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-50.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-51.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-52.png" alt="" />
+
+</div>
+<pre><code>## [1] 5.5457
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-53.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-54.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-55.png" alt="" />
+
+</div>
+<pre><code>## [1] 1.230192
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-56.png" alt="" />
+
+</div>
+<pre><code>## [1] 2.032204
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-57.png" alt="" />
+
+</div>
+<pre><code>## [1] 3.357081
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-58.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-59.png" alt="" />
+
+</div>
+<pre><code>## [1] 25
+
+## Warning in predict.lm(object, newdata, se.fit, scale = 1, type =
+## ifelse(type == : prediction from a rank-deficient fit may be misleading</code></pre>
+<div class="figure">
+<img src="DemoCounts_files/figure-markdown_github/collectres-60.png" alt="" />
+
+</div>
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r">d &lt;-<span class="st"> </span>fitRes[fitRes$model!=<span class="st">&#39;Native Indicators&#39;</span>,,drop=<span class="ot">FALSE</span> ]
+for(ndup in <span class="kw">sort</span>(<span class="kw">unique</span>(d$ndup))) {
+  <span class="kw">print</span>(WVPlots::<span class="kw">ScatterBoxPlotH</span>(d[d$ndup==ndup,,<span class="dt">drop=</span><span class="ot">FALSE</span>],<span class="st">&#39;pseudoR2&#39;</span>,<span class="st">&#39;model&#39;</span>,
+          <span class="kw">paste0</span>(<span class="st">&#39;model performance (variable duplication level=&#39;</span>,ndup,<span class="st">&#39;)&#39;</span>)) +<span class="st"> </span>
+<span class="st">          </span><span class="kw">facet_wrap</span>(~data,<span class="dt">ncol=</span><span class="dv">1</span>))
+}</code></pre></div>
+<p><img src="DemoCounts_files/figure-markdown_github/plot-1.png" alt="" /><img src="DemoCounts_files/figure-markdown_github/plot-2.png" alt="" /><img src="DemoCounts_files/figure-markdown_github/plot-3.png" alt="" /></p>
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r">parallel::<span class="kw">stopCluster</span>(cl)</code></pre></div>

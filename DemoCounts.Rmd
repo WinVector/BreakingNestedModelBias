@@ -1,0 +1,108 @@
+---
+title: "DemoCounts"
+author: "Win-Vector LLC"
+date: "November 7, 2016"
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup}
+library('dplyr')
+library('tidyr')
+library('sigr') # https://github.com/WinVector/sigr
+library('ggplot2')
+library('vtreat')
+source('fns.R')
+
+set.seed(236526)
+
+cl <- parallel::makeCluster(parallel::detectCores())
+parallel::clusterExport(cl=cl, setdiff(ls(),'cl'),
+              envir=environment())
+for(lib in c('dplyr', 'tidyr', 'vtreat' )) {
+  mkfn <- function(lib) {
+    force(lib)
+    function() {
+      library(lib,character.only = TRUE)
+    }
+  }
+  fn <- mkfn(lib)
+  parallel::clusterCall(cl, fn )
+}
+```
+
+
+
+```{r collectres}
+cacheFile <- 'fitRes.RDS'
+if(!file.exists(cacheFile)) {
+  fitRes <- c()
+  for(runnum in 1:10) {
+    generator = defineGenerator(5,20,0.75,0.3)
+    for(ndup in c(0,1,4)) {
+      dTrain <- generateData(generator,ndup,500)
+      dTest <- generateData(generator,ndup,10000)
+      resi <- NULL
+      # resi <- rbind(runIndicators(dTrain,dTest)) # crashes on novel levels
+      resi <- rbind(resi,runNaive(dTrain,dTest))
+      resi <- rbind(resi,runSplit(dTrain,dTest))
+      resi <- rbind(resi,runJackknifed(dTrain,dTest))
+      resi <- rbind(resi,runVtreat(dTrain,dTest))
+      resi$LaplaceRate <- NA_real_
+      
+      for(absit in c(FALSE,TRUE)) {
+        # get a good Laplace noise rate sigma
+        estL <- data.frame(LaplaceNoiseRate=sort(rep(exp(seq(log(0.1),log(25),length.out=12)),5)))
+        mkLScoreFn <- function(dTrain,dTest,absit) {
+          force(dTrain)
+          force(dTest)
+          force(absit)
+          function(sigma) {
+            runLaplaceNoised(dTrain,dTest,laplaceRate=sigma,absNoise=absit)
+          }
+        }
+        LScoreFn <- mkLScoreFn(dTrain,dTest,absit)
+        scrs <-  parallel::parLapplyLB(cl,estL$LaplaceNoiseRate,LScoreFn)
+        estL$pseudoR2 <- vapply(scrs,
+                                function(si) {
+                                  si$pseudoR2[si$data=='test']
+                                },numeric(1))
+        
+        print(ggplot(data=estL,mapping=aes(x=LaplaceNoiseRate,y=pseudoR2)) +
+                geom_point() + geom_smooth() +
+                ggtitle(paste0('finding optimal Laplace noise rate for ndup=',ndup,
+                               ', abs=',absit)))
+        estL %>% group_by(LaplaceNoiseRate) %>% 
+          summarize(meanPseudoR2=mean(pseudoR2)) -> estS
+        laplaceRate <- estS$LaplaceNoiseRate[which.max(estS$meanPseudoR2)]
+        print(laplaceRate)
+        resL <- runLaplaceNoised(dTrain,dTest,laplaceRate=laplaceRate,absNoise=absit)
+        resL$LaplaceRate <- laplaceRate
+        resi <- rbind(resi,resL)
+      }
+      
+      resi$ndup <- ndup
+      resi$runnum <- runnum
+      
+      fitRes <- rbind(fitRes,resi)
+    }
+  }
+  saveRDS(fitRes,file=cacheFile)
+} else {
+  fitRes <- readRDS(file=cacheFile)
+}
+```
+
+```{r plot}
+d <- fitRes[fitRes$model!='Native Indicators',,drop=FALSE ]
+for(ndup in sort(unique(d$ndup))) {
+  print(WVPlots::ScatterBoxPlotH(d[d$ndup==ndup,,drop=FALSE],'pseudoR2','model',
+          paste0('model performance (variable duplication level=',ndup,')')) + 
+          facet_wrap(~data,ncol=1))
+}
+```
+
+```{r cleanup}
+parallel::stopCluster(cl)
+```
