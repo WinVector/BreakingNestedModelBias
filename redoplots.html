@@ -1,0 +1,18 @@
+<div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r"><span class="kw">library</span>(<span class="st">&#39;ggplot2&#39;</span>)
+fitRes &lt;-<span class="st"> </span><span class="kw">readRDS</span>(<span class="dt">file=</span><span class="st">&#39;fitRes.RDS&#39;</span>)
+d &lt;-<span class="st"> </span>fitRes[fitRes$model!=<span class="st">&#39;Native Indicators&#39;</span>,,drop=<span class="ot">FALSE</span> ]
+
+d$model &lt;-<span class="st"> </span><span class="kw">factor</span>(d$model,<span class="dt">levels =</span> <span class="kw">rev</span>(<span class="kw">c</span>(
+  <span class="st">&quot;vtreat Impact Coding&quot;</span>,
+  <span class="st">&quot;Jackknife Count Coding&quot;</span>,
+  <span class="st">&quot;Split Count Coding&quot;</span>,
+  <span class="st">&quot;Naive Count Coding&quot;</span>,
+  <span class="st">&quot;Laplace Noised Count Coding&quot;</span>,
+  <span class="st">&quot;Laplace Noised Count Coding (abs)&quot;</span>)))
+
+for(ndup in <span class="kw">sort</span>(<span class="kw">unique</span>(d$ndup))) {
+  <span class="kw">print</span>(WVPlots::<span class="kw">ScatterBoxPlotH</span>(d[d$ndup==ndup,,<span class="dt">drop=</span><span class="ot">FALSE</span>],<span class="st">&#39;pseudoR2&#39;</span>,<span class="st">&#39;model&#39;</span>,
+          <span class="kw">paste0</span>(<span class="st">&#39;model performance (variable duplication level=&#39;</span>,ndup,<span class="st">&#39;)&#39;</span>)) +<span class="st"> </span>
+<span class="st">          </span><span class="kw">facet_wrap</span>(~data,<span class="dt">ncol=</span><span class="dv">1</span>))
+}</code></pre></div>
+<p><img src="redoplots_files/figure-markdown_github/replot-1.png" alt="" /><img src="redoplots_files/figure-markdown_github/replot-2.png" alt="" /><img src="redoplots_files/figure-markdown_github/replot-3.png" alt="" /></p>
