@@ -84,7 +84,7 @@ print(mean(d$novelRows>0))
     ## [1] 4e-04
 
 ``` r
-print(WVPlots::ScatterBoxPlotH(d,'pseudoR2','ndup','direct indicator model performance') +
+print(WVPlots::ScatterBoxPlotH(d,'pseudoR2','model','direct indicator model performance') +
          facet_wrap(~data,ncol=1))
 ```
 
